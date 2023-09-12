@@ -17,7 +17,6 @@
 #include <algorithm>
 #include <cstring>
 #include <vector>
-#include "transfer.cpp"
 
 const size_t BUFFER_SIZE = 2048; //
 #define PORT "3490"              // the port users will be connecting to
@@ -101,7 +100,7 @@ void modify_http_request(char *&request)
         }
     }
 }
-void modify_http_response(std::string &header, std::string &body)
+void modify_http_response(std::string &body)
 {
 
     // image case
@@ -168,12 +167,11 @@ bool is_content_type_text_based(std::string &header)
     size_t found = header.find("text", content_type_start);
     return found != std::string::npos;
 }
-int process_http_response(int sockfd, char *&response_after_modified, size_t &response_size)
+int process_http_response(int sockfd, int const server_newfd)
 {
     char buffer[1024] = {0};
     std::string header;
     std::string text_body;
-    std::vector<char> binary_body;
     bool header_found = false;
     bool is_binary = false;
     while (1)
@@ -195,6 +193,12 @@ int process_http_response(int sockfd, char *&response_after_modified, size_t &re
             if (t == NULL)
             {
                 // all of content in buffer is a part of header.
+                int sent_bytes = send(server_newfd, buffer, bytes_received, 0);
+                if (sent_bytes == -1)
+                {
+                    perror("server: send back to browser");
+                    return -1;
+                }
                 header.insert(header.end(), buffer, buffer + bytes_received);
             }
             else
@@ -205,7 +209,12 @@ int process_http_response(int sockfd, char *&response_after_modified, size_t &re
                 if (!is_content_type_text_based(header))
                 {
                     is_binary = true;
-                    binary_body.insert(binary_body.end(), t + 4, buffer + bytes_received);
+                    int sent_bytes = send(server_newfd, buffer, bytes_received, 0);
+                    if (sent_bytes == -1)
+                    {
+                        perror("server: send back to browser");
+                        return -1;
+                    }
                 }
                 else
                 {
@@ -217,7 +226,12 @@ int process_http_response(int sockfd, char *&response_after_modified, size_t &re
         {
             if (is_binary)
             {
-                binary_body.insert(binary_body.end(), buffer, buffer + bytes_received);
+                int sent_bytes = send(server_newfd, buffer, bytes_received, 0);
+                if (sent_bytes == -1)
+                {
+                    perror("server: send back to browser");
+                    return -1;
+                }
             }
             else
             {
@@ -225,45 +239,31 @@ int process_http_response(int sockfd, char *&response_after_modified, size_t &re
             }
         }
     }
-    // modify the text body
+    // modify the text body only
     if (is_binary)
     {
-        size_t total_size = header.size() + binary_body.size();
-        response_after_modified = (char *)malloc(total_size + 1);
-        if (response_after_modified != nullptr)
-        {
-            memcpy(response_after_modified, header.data(), header.size());
-            memcpy(response_after_modified + header.size(), binary_body.data(), binary_body.size());
-            response_after_modified[total_size] = '\0';
-            response_size = total_size;
-            return 1;
-        }
-        else
-        {
-            return -1;
-        }
+        return 1;
     }
     else
     {
-        modify_http_response(header, text_body);
-        size_t total_size = header.size() + text_body.size();
-        response_after_modified = (char *)malloc(total_size + 1);
-        if (response_after_modified != nullptr)
+        modify_http_response(text_body);
+        int sent_bytes = send(server_newfd, header.c_str(), header.length(), 0);
+        if (sent_bytes == -1)
         {
-            memcpy(response_after_modified, header.data(), header.size());
-            memcpy(response_after_modified + header.size(), text_body.data(), text_body.size());
-            response_after_modified[total_size] = '\0';
-            response_size = total_size;
-            return 1;
-        }
-        else
-        {
+            perror("server: send back to browser");
             return -1;
         }
+        sent_bytes = send(server_newfd, text_body.c_str(), text_body.length(), 0);
+        if (sent_bytes == -1)
+        {
+            perror("server: send back to browser");
+            return -1;
+        }
+        return 1;
     }
 }
 
-int get_response_from_target_server(char const *host, char *&request, char *&result, size_t &total_size)
+int get_response_from_target_server(int const server_newfd, char const *host, char *&request)
 {
     int client_socket;
     struct addrinfo hints, *servinfo, *p;
@@ -329,13 +329,12 @@ int get_response_from_target_server(char const *host, char *&request, char *&res
     }
     printf("request being sent : %s\n", request);
 
-    if (process_http_response(client_socket, result, total_size) == -1)
+    if (process_http_response(client_socket, server_newfd) == -1)
     {
         perror("process");
         close(client_socket);
         return -1;
     }
-    printf("response from target server : %s\n", result);
 
     close(client_socket);
 
@@ -471,25 +470,17 @@ int main(int argc, char *argv[])
                     exit(1);
                 }
                 char *request = recvBuf;
-                char *response_from_proxy_client;
                 size_t total_size_of_response;
                 size_t bytes_sent = 0;
 
-                if (get_response_from_target_server(host, request, response_from_proxy_client, total_size_of_response) == -1)
+                if (get_response_from_target_server(new_fd, host, request) == -1)
                 {
                     perror("client: transfer");
                     close(new_fd);
                     exit(1);
                 }
-                int sent_bytes = send(new_fd, response_from_proxy_client, total_size_of_response, 0);
-                if (sent_bytes == -1)
-                {
-                    perror("sent: ");
-                    exit(1);
-                }
 
                 free(host);
-                free(response_from_proxy_client);
             }
             else if (num == 0)
             {
