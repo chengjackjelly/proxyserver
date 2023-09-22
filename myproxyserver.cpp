@@ -19,9 +19,9 @@
 #include <vector>
 
 const size_t BUFFER_SIZE = 2048; //
+#define TIMEOUT 10               // timeout for  response from target server
 #define PORT "3490"              // the port users will be connecting to
 #define BACKLOG 10               // how many pending connections queue will hold
-#define MAXDATASIZE 1024         // max number of bytes we can get at once
 using std::string;
 void *get_in_addr(struct sockaddr *sa)
 {
@@ -169,7 +169,7 @@ bool is_content_type_text_based(std::string &header)
 }
 int process_http_response(int sockfd, int const server_newfd)
 {
-    char buffer[1024] = {0};
+    char buffer[BUFFER_SIZE] = {0};
     std::string header;
     std::string text_body;
     bool header_found = false;
@@ -263,13 +263,13 @@ int process_http_response(int sockfd, int const server_newfd)
     }
 }
 
-int get_response_from_target_server(int const server_newfd, char const *host, char *&request)
+int proxy_client(int const server_newfd, char const *host, char *&request)
 {
     int client_socket;
     struct addrinfo hints, *servinfo, *p;
     int rv;
     char s[INET6_ADDRSTRLEN];
-    char recvBuf[MAXDATASIZE] = {0};
+    char recvBuf[BUFFER_SIZE] = {0};
 
     memset(&hints, 0, sizeof hints);
     hints.ai_family = AF_UNSPEC;
@@ -315,7 +315,7 @@ int get_response_from_target_server(int const server_newfd, char const *host, ch
 
     // Set a timeout for the recv operation
     struct timeval timeout;
-    timeout.tv_sec = 10; // 10-second timeout
+    timeout.tv_sec = TIMEOUT;
     timeout.tv_usec = 0;
     setsockopt(client_socket, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
 
@@ -398,7 +398,12 @@ int main(int argc, char *argv[])
     int yes = 1;
     char s[INET6_ADDRSTRLEN];
     int rv;
-    char recvBuf[2048] = {0};
+    char recvBuf[BUFFER_SIZE] = {0};
+
+    const char *BAD_REQUEST_400 = "HTTP/1.1 400 Bad Request\r\n"
+                                  "Content-Type: text/plain\r\n"
+                                  "Content-Length: 23\r\n\r\n"
+                                  "Bad Request: Invalid URL\r\n";
 
     if (get_listener_socket(server_socket) == -1)
     {
@@ -456,10 +461,6 @@ int main(int argc, char *argv[])
                 if (getHostFromRequest(recvBuf, host) == -1)
                 {
                     std::cerr << "Error occur when try to Parse host from request";
-                    const char *BAD_REQUEST_400 = "HTTP/1.1 400 Bad Request\r\n"
-                                                  "Content-Type: text/plain\r\n"
-                                                  "Content-Length: 23\r\n\r\n"
-                                                  "Bad Request: Invalid URL\r\n";
 
                     int ret = send(new_fd, BAD_REQUEST_400, sizeof(BAD_REQUEST_400), 0);
                     if (ret == -1)
@@ -470,10 +471,7 @@ int main(int argc, char *argv[])
                     exit(1);
                 }
                 char *request = recvBuf;
-                size_t total_size_of_response;
-                size_t bytes_sent = 0;
-
-                if (get_response_from_target_server(new_fd, host, request) == -1)
+                if (proxy_client(new_fd, host, request) == -1)
                 {
                     perror("client: transfer");
                     close(new_fd);
